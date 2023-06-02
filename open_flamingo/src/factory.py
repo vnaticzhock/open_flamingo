@@ -1,5 +1,6 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import open_clip
+import torch
 
 from .flamingo import Flamingo
 from .flamingo_lm import FlamingoLMMixin
@@ -14,6 +15,10 @@ def create_model_and_transforms(
     cross_attn_every_n_layers: int = 1,
     use_local_files: bool = False,
     decoder_layers_attr_name: str = None,
+    inference: bool = False,
+    precision: str = 'auto', ## 'auto', 'fp16', 'int8'
+    device: str = 'cpu', ## 'cpu', 'cuda'
+    checkpoint_path: str = None,
     **flamingo_kwargs,
 ):
     """
@@ -34,7 +39,8 @@ def create_model_and_transforms(
         Tokenizer: A tokenizer for the language model
     """
     vision_encoder, _, image_processor = open_clip.create_model_and_transforms(
-        clip_vision_encoder_path, pretrained=clip_vision_encoder_pretrained
+        clip_vision_encoder_path, pretrained=clip_vision_encoder_pretrained,
+        precision=precision, device=device,
     )
     # set the vision encoder to output the visual features
     vision_encoder.visual.output_tokens = True
@@ -51,9 +57,22 @@ def create_model_and_transforms(
         # modify labels for the loss.
         text_tokenizer.add_special_tokens({"pad_token": "<PAD>"})
 
+    torch_dtype = torch.float32
+    quantization_config = None
+
+    if precision == 'fp16':
+        torch_dtype = torch.float16
+    elif precision == 'int8':
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True
+        )
+
     lang_encoder = AutoModelForCausalLM.from_pretrained(
-        lang_encoder_path, local_files_only=use_local_files
-    )
+        lang_encoder_path, local_files_only=use_local_files,
+        torch_dtype=torch_dtype,
+        quantization_config=quantization_config
+    ).to(device)
+
     extend_instance(lang_encoder, FlamingoLMMixin)
 
     if decoder_layers_attr_name is None:
@@ -78,9 +97,14 @@ def create_model_and_transforms(
     assert sum(p.numel() for p in model.parameters() if p.requires_grad) == 0
 
     # Unfreeze perceiver, gated_cross_attn_layers, and LM input embeddings
-    model.perceiver.requires_grad_(True)
-    model.lang_encoder.gated_cross_attn_layers.requires_grad_(True)
-    model.lang_encoder.get_input_embeddings().requires_grad_(True)
+    model.perceiver.requires_grad_(not inference)
+    model.lang_encoder.gated_cross_attn_layers.requires_grad_(not inference)
+    model.lang_encoder.get_input_embeddings().requires_grad_(not inference)
+
+    if checkpoint_path is not None:
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
+    else:
+        print("WARNING: No checkpoint path provided. Initializing model randomly.")
 
     print(
         f"Flamingo model initialized with {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters"
