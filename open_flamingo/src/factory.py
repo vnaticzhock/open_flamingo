@@ -1,11 +1,18 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-import open_clip
+import open_clip 
 import torch
+from open_clip import transformer
+import torch.nn.functional as F
 
 from .flamingo import Flamingo
 from .flamingo_lm import FlamingoLMMixin
 from .utils import extend_instance
 
+def LNormforward(self, x: torch.Tensor):
+    print('substitue layer norm to use fp16')
+    return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+
+transformer.LayerNormFp32.forward = LNormforward
 
 def create_model_and_transforms(
     clip_vision_encoder_path: str,
@@ -67,11 +74,12 @@ def create_model_and_transforms(
             load_in_8bit=True
         )
 
+    ## language encoder fp16
     lang_encoder = AutoModelForCausalLM.from_pretrained(
         lang_encoder_path, local_files_only=use_local_files,
         torch_dtype=torch_dtype,
         quantization_config=quantization_config
-    ).to(device)
+    )
 
     extend_instance(lang_encoder, FlamingoLMMixin)
 
@@ -109,6 +117,17 @@ def create_model_and_transforms(
     print(
         f"Flamingo model initialized with {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters"
     )
+
+    ## try to force everything in fp16 and gpu
+    model.perceiver = model.perceiver.to(device)
+    model.lang_encoder = model.lang_encoder.to(device)
+    model.to(device)
+    if precision == 'fp16':
+        model.vision_encoder = model.vision_encoder.half() # this remains on fp32, don't know why
+        model.lang_encoder = model.lang_encoder.half()
+        model.perceiver = model.perceiver.half()
+
+    
 
     return model, image_processor, text_tokenizer
 
