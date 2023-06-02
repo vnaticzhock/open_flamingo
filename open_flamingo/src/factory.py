@@ -1,4 +1,5 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from huggingface_hub import hf_hub_download
 import open_clip 
 import torch
 from open_clip import transformer
@@ -45,6 +46,7 @@ def create_model_and_transforms(
         Image processor: Pipeline to preprocess input images
         Tokenizer: A tokenizer for the language model
     """
+    print('1/4 Loading open clip...')
     vision_encoder, _, image_processor = open_clip.create_model_and_transforms(
         clip_vision_encoder_path, pretrained=clip_vision_encoder_pretrained,
         precision=precision, device=device,
@@ -52,6 +54,7 @@ def create_model_and_transforms(
     # set the vision encoder to output the visual features
     vision_encoder.visual.output_tokens = True
 
+    print('2/4 Loading tokenizer...')
     text_tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_path, local_files_only=use_local_files
     )
@@ -75,6 +78,7 @@ def create_model_and_transforms(
         )
 
     ## language encoder fp16
+    print('3/4 Loading... causal lm')
     lang_encoder = AutoModelForCausalLM.from_pretrained(
         lang_encoder_path, local_files_only=use_local_files,
         torch_dtype=torch_dtype,
@@ -88,6 +92,7 @@ def create_model_and_transforms(
     lang_encoder.set_decoder_layers_attr_name(decoder_layers_attr_name)
     lang_encoder.resize_token_embeddings(len(text_tokenizer))
 
+    print('4/4 Loading... flamingo')
     model = Flamingo(
         vision_encoder,
         lang_encoder,
@@ -110,6 +115,7 @@ def create_model_and_transforms(
     model.lang_encoder.get_input_embeddings().requires_grad_(not inference)
 
     if checkpoint_path is not None:
+        checkpoint_path = hf_hub_download(checkpoint_path, 'checkpoint.pt')
         model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
     else:
         print("WARNING: No checkpoint path provided. Initializing model randomly.")
@@ -126,8 +132,6 @@ def create_model_and_transforms(
         model.vision_encoder = model.vision_encoder.half() # this remains on fp32, don't know why
         model.lang_encoder = model.lang_encoder.half()
         model.perceiver = model.perceiver.half()
-
-    
 
     return model, image_processor, text_tokenizer
 
